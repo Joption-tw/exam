@@ -138,7 +138,7 @@
 
         const App = () => {
             const [user, setUser] = useState(null);
-            const [profile, setProfile] = useState({ coins: 0, gameChances: 0 });
+            const [profile, setProfile] = useState({ coins: 0, gameChances: 0, correctCount: 0 });
             const [tasks, setTasks] = useState([]); 
             const [isLoading, setIsLoading] = useState(true);
             const [isSubmitting, setIsSubmitting] = useState(false);
@@ -192,8 +192,7 @@
                             try {
                                 await signInWithCustomToken(auth, __initial_auth_token);
                             } catch (tokenError) {
-                                // 如果使用了自訂的 Firebase 設定，環境提供的 token 驗證會失敗(mismatch)，此時退回使用匿名登入
-                                console.warn("Custom token mismatch (likely due to custom Firebase config). Falling back to anonymous auth.", tokenError);
+                                console.warn("Custom token mismatch. Falling back to anonymous auth.", tokenError);
                                 await signInAnonymously(auth);
                             }
                         } else {
@@ -211,17 +210,16 @@
             // 監聽 Profile 資料
             useEffect(() => {
                 if (!user) return;
-                // 為了避免使用者的 Firebase rules 阻擋其他集合，我們將全域設定儲存在已知的 'tasks' 集合下的 'GLOBAL_PROFILE' 文件中
                 const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
                 const unsubProfile = onSnapshot(profileRef, (docSnap) => {
                     if (docSnap.exists()) {
                         setProfile(docSnap.data());
                     } else {
-                        // 建立全域初始檔案
                         const initialData = {
-                            type: 'profile', // 標記類型以便過濾
+                            type: 'profile',
                             coins: 0,
                             gameChances: 0,
+                            correctCount: 0, // 新增正確題數計數器
                             createdAt: serverTimestamp()
                         };
                         setDoc(profileRef, initialData);
@@ -238,7 +236,6 @@
                 if (!user) return;
                 const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tasks'));
                 const unsubscribe = onSnapshot(q, (snap) => {
-                    // 過濾掉 'GLOBAL_PROFILE' 防止設定檔顯示在清單中
                     const loadedTasks = snap.docs
                         .filter(doc => doc.id !== 'GLOBAL_PROFILE' && doc.data().type !== 'profile')
                         .map(doc => ({ id: doc.id, ...doc.data() }));
@@ -257,13 +254,32 @@
                 return () => clearInterval(timer);
             }, [targetDate]);
             
-            // 增加遊戲券邏輯
+            // 增加遊戲券邏輯 (改為3題1張)
             const incrementGameChance = async () => {
                 if (!user) return;
                 const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
-                await setDoc(profileRef, { gameChances: (profile.gameChances || 0) + 1 }, { merge: true });
-                setAiMessage({ text: "獲得 1 張遊戲券！", status: 'correct', loading: false });
-                setTimeout(() => setAiMessage(null), 1500);
+                
+                // 為了安全確保資料最新，先獲取目前狀態
+                const profileSnap = await getDoc(profileRef);
+                if (!profileSnap.exists()) return;
+                
+                const currentData = profileSnap.data();
+                const currentCount = currentData.correctCount || 0;
+                const newCount = currentCount + 1;
+                
+                if (newCount >= 3) {
+                    await setDoc(profileRef, { 
+                        gameChances: (currentData.gameChances || 0) + 1,
+                        correctCount: 0 
+                    }, { merge: true });
+                    setAiMessage({ text: "🎉 集滿 3 題，獲得 1 張遊戲券！", status: 'correct', loading: false });
+                } else {
+                    await setDoc(profileRef, { 
+                        correctCount: newCount 
+                    }, { merge: true });
+                    setAiMessage({ text: `獲得 1 點！(集券進度: ${newCount}/3)`, status: 'correct', loading: false });
+                }
+                setTimeout(() => setAiMessage(null), 2500);
             };
 
             const fetchMomMessage = async (retryCount = 0) => {
@@ -483,7 +499,7 @@
                     setTimeout(async () => { 
                         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', task.id), { completed: true, status: 'archived', completedAt: serverTimestamp(), attempts: newAttempts }); 
                         setAiMessage(null); setActiveExamTask(null);
-                        incrementGameChance(); // 獎勵遊戲券
+                        incrementGameChance(); // 獎勵遊戲券進度
                     }, 800); 
                 } else {
                     setAiMessage({ text: "不通！", status: 'wrong', loading: false });
@@ -498,12 +514,10 @@
                 setPlayingGame(gameType);
                 setGameResult(null);
                 
-                // 模擬動畫時間後顯示結果
                 setTimeout(async () => {
                     const prize = Math.floor(Math.random() * 10) + 1; // 1~10 元
                     setGameResult(prize);
                     
-                    // 更新 DB 全域帳戶
                     const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
                     await setDoc(profileRef, { 
                         gameChances: profile.gameChances - 1,
@@ -548,7 +562,7 @@
                                         </div>
                                         <div className="w-px bg-stone-700"></div>
                                         <div className="flex flex-col items-center">
-                                            <span className="text-[10px] text-emerald-200/50 font-bold uppercase">遊戲券</span>
+                                            <span className="text-[10px] text-emerald-200/50 font-bold uppercase flex items-center gap-1">遊戲券 <span className="bg-emerald-900/50 text-emerald-300 px-1 rounded border border-emerald-500/30 tracking-wider">進度 {profile.correctCount || 0}/3</span></span>
                                             <div className="flex items-center gap-1 text-emerald-400 font-black text-2xl"><Icon name="ticket" size={24} /> {profile.gameChances}</div>
                                         </div>
                                     </div>
@@ -694,6 +708,7 @@
                         <div className="w-px h-4 bg-white/20"></div>
                         <div className="flex items-center gap-1.5 text-emerald-400 font-black text-sm">
                             <Icon name="ticket" size={16} /> <span className="text-white text-xs">遊戲券</span> {profile.gameChances}
+                            <span className="hidden sm:inline-block text-[10px] text-emerald-200/50 bg-emerald-900/30 px-1.5 py-0.5 rounded ml-1 tracking-wider border border-emerald-500/20">進度 {profile.correctCount || 0}/3</span>
                         </div>
                     </div>
 
