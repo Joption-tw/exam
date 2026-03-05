@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>稟軒會考衝刺首頁 - SAI 應試覺醒 V13.43</title>
+    <title>稟軒會考衝刺首頁 - SAI 應試覺醒 V14.00</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- React & Babel -->
@@ -53,6 +53,25 @@
             border-color: #ef4444 !important;
             box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
         }
+        
+        /* 遊戲動畫特效 */
+        @keyframes fast-spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(1800deg); }
+        }
+        .animate-fast-spin { animation: fast-spin 2s cubic-bezier(0.25, 1, 0.5, 1) forwards; }
+        
+        @keyframes shake-tube {
+            0%, 100% { transform: rotate(0deg); }
+            25% { transform: rotate(-15deg); }
+            75% { transform: rotate(15deg); }
+        }
+        .animate-shake-tube { animation: shake-tube 0.3s ease-in-out infinite; }
+        
+        .flip-card-inner { transition: transform 0.6s; transform-style: preserve-3d; }
+        .flip-card.flipped .flip-card-inner { transform: rotateY(180deg); }
+        .flip-card-front, .flip-card-back { backface-visibility: hidden; }
+        .flip-card-back { transform: rotateY(180deg); }
 
         .mom-quote-card {
             background: linear-gradient(135deg, #ffffff 0%, #fef2f2 100%);
@@ -86,8 +105,8 @@
         };
 
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, where, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, where, serverTimestamp, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
         const app = initializeApp(myFirebaseConfig);
         const auth = getAuth(app);
@@ -96,9 +115,9 @@
         const apiKey = ""; 
 
         const SUBJECTS = ["國文", "英文", "數學", "自然", "社會", "其他"];
-
+        
         const Icon = ({ name, size = 20, className = "" }) => {
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name, className]);
             return (
                 <span className={`inline-flex items-center justify-center ${className}`} style={{ width: size, height: size }}>
                     <i data-lucide={name} style={{ width: size, height: size }}></i>
@@ -119,6 +138,7 @@
 
         const App = () => {
             const [user, setUser] = useState(null);
+            const [profile, setProfile] = useState({ coins: 0, gameChances: 0 });
             const [tasks, setTasks] = useState([]); 
             const [isLoading, setIsLoading] = useState(true);
             const [isSubmitting, setIsSubmitting] = useState(false);
@@ -143,6 +163,11 @@
 
             const [momMessage, setMomMessage] = useState("稟軒，這一步是通往夢想的神之一手。加油！");
             const [isMessageLoading, setIsMessageLoading] = useState(false);
+            
+            // 遊戲中心 State
+            const [showGameCenter, setShowGameCenter] = useState(false);
+            const [playingGame, setPlayingGame] = useState(null); // 'roulette', 'lots', 'scratch'
+            const [gameResult, setGameResult] = useState(null);
 
             const getLocalDateString = () => {
                 const now = new Date();
@@ -159,7 +184,88 @@
             const targetDate = useMemo(() => new Date('2026-05-16T00:00:00'), []);
             const todayStr = useMemo(() => getLocalDateString(), []);
 
-            // 指數退避重試函數 (Mandatory for Gemini API)
+            // 初始化與監聽 Auth 
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            try {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } catch (tokenError) {
+                                // 如果使用了自訂的 Firebase 設定，環境提供的 token 驗證會失敗(mismatch)，此時退回使用匿名登入
+                                console.warn("Custom token mismatch (likely due to custom Firebase config). Falling back to anonymous auth.", tokenError);
+                                await signInAnonymously(auth);
+                            }
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Auth init error:", error);
+                    }
+                };
+                initAuth();
+                const unsubscribe = onAuthStateChanged(auth, setUser);
+                return () => unsubscribe();
+            }, []);
+
+            // 監聽 Profile 資料
+            useEffect(() => {
+                if (!user) return;
+                // 為了避免使用者的 Firebase rules 阻擋其他集合，我們將全域設定儲存在已知的 'tasks' 集合下的 'GLOBAL_PROFILE' 文件中
+                const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
+                const unsubProfile = onSnapshot(profileRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        setProfile(docSnap.data());
+                    } else {
+                        // 建立全域初始檔案
+                        const initialData = {
+                            type: 'profile', // 標記類型以便過濾
+                            coins: 0,
+                            gameChances: 0,
+                            createdAt: serverTimestamp()
+                        };
+                        setDoc(profileRef, initialData);
+                        setProfile(initialData);
+                    }
+                }, (error) => console.error("Profile listen error:", error));
+                
+                return () => unsubProfile();
+            }, [user]);
+
+            useEffect(() => { fetchMomMessage(); }, [viewMode]);
+
+            useEffect(() => {
+                if (!user) return;
+                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tasks'));
+                const unsubscribe = onSnapshot(q, (snap) => {
+                    // 過濾掉 'GLOBAL_PROFILE' 防止設定檔顯示在清單中
+                    const loadedTasks = snap.docs
+                        .filter(doc => doc.id !== 'GLOBAL_PROFILE' && doc.data().type !== 'profile')
+                        .map(doc => ({ id: doc.id, ...doc.data() }));
+                    setTasks(loadedTasks);
+                    setIsLoading(false);
+                }, (err) => console.error("Firestore Listen Error", err));
+                return () => unsubscribe();
+            }, [user]);
+
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    const diff = targetDate - new Date();
+                    if (diff <= 0) setTimeLeft({ d: 0, h: 0, m: 0, s: 0 });
+                    else setTimeLeft({ d: Math.floor(diff / 86400000), h: Math.floor((diff / 3600000) % 24), m: Math.floor((diff / 60000) % 60), s: Math.floor((diff / 1000) % 60) });
+                }, 1000);
+                return () => clearInterval(timer);
+            }, [targetDate]);
+            
+            // 增加遊戲券邏輯
+            const incrementGameChance = async () => {
+                if (!user) return;
+                const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
+                await setDoc(profileRef, { gameChances: (profile.gameChances || 0) + 1 }, { merge: true });
+                setAiMessage({ text: "獲得 1 張遊戲券！", status: 'correct', loading: false });
+                setTimeout(() => setAiMessage(null), 1500);
+            };
+
             const fetchMomMessage = async (retryCount = 0) => {
                 if (retryCount === 0) {
                     if (isMessageLoading) return;
@@ -196,7 +302,6 @@
                         setTimeout(() => fetchMomMessage(retryCount + 1), delay);
                         return;
                     }
-                    // 所有重試失敗後的 fallback
                     setMomMessage("稟軒，不論遇到什麼困難，媽媽永遠支持你，全力衝刺吧！");
                 } finally {
                     if (retryCount === 0 || retryCount >= 5) {
@@ -204,32 +309,6 @@
                     }
                 }
             };
-
-            useEffect(() => { fetchMomMessage(); }, [viewMode]);
-
-            useEffect(() => {
-                const unsubscribe = onAuthStateChanged(auth, u => { if (!u) signInAnonymously(auth); setUser(u); });
-                return () => unsubscribe();
-            }, []);
-
-            useEffect(() => {
-                if (!user) return;
-                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tasks'));
-                const unsubscribe = onSnapshot(q, (snap) => {
-                    setTasks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                    setIsLoading(false);
-                }, (err) => console.error("Firestore Listen Error", err));
-                return () => unsubscribe();
-            }, [user]);
-
-            useEffect(() => {
-                const timer = setInterval(() => {
-                    const diff = targetDate - new Date();
-                    if (diff <= 0) setTimeLeft({ d: 0, h: 0, m: 0, s: 0 });
-                    else setTimeLeft({ d: Math.floor(diff / 86400000), h: Math.floor((diff / 3600000) % 24), m: Math.floor((diff / 60000) % 60), s: Math.floor((diff / 1000) % 60) });
-                }, 1000);
-                return () => clearInterval(timer);
-            }, [targetDate]);
 
             const sortedTasks = useMemo(() => {
                 const sorted = [...tasks].sort((a, b) => {
@@ -391,6 +470,7 @@
                 setTimeout(async () => { 
                     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', task.id), { completed: true, status: 'archived', completedAt: serverTimestamp(), attempts: (task.attempts || 0) + 1 }); 
                     setAiMessage(null); 
+                    incrementGameChance(); // 獎勵遊戲券
                 }, 800);
             };
 
@@ -403,12 +483,34 @@
                     setTimeout(async () => { 
                         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', task.id), { completed: true, status: 'archived', completedAt: serverTimestamp(), attempts: newAttempts }); 
                         setAiMessage(null); setActiveExamTask(null);
+                        incrementGameChance(); // 獎勵遊戲券
                     }, 800); 
                 } else {
                     setAiMessage({ text: "不通！", status: 'wrong', loading: false });
                     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', task.id), { wasIncorrect: true, status: 'needsReview', attempts: newAttempts });
                     setTimeout(() => setAiMessage(null), 800);
                 }
+            };
+            
+            // 執行小遊戲扣款與發獎
+            const executeGame = (gameType) => {
+                if (profile.gameChances < 1) return;
+                setPlayingGame(gameType);
+                setGameResult(null);
+                
+                // 模擬動畫時間後顯示結果
+                setTimeout(async () => {
+                    const prize = Math.floor(Math.random() * 10) + 1; // 1~10 元
+                    setGameResult(prize);
+                    
+                    // 更新 DB 全域帳戶
+                    const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'tasks', 'GLOBAL_PROFILE');
+                    await setDoc(profileRef, { 
+                        gameChances: profile.gameChances - 1,
+                        coins: profile.coins + prize 
+                    }, { merge: true });
+                    
+                }, gameType === 'scratch' ? 600 : 2000); // 刮刮樂較快，其他要播動畫
             };
 
             const subStyles = {
@@ -426,6 +528,80 @@
             return (
                 <div className="min-h-screen relative pb-20 text-[#2D2D2D]">
                     <div className="go-board-overlay"></div>
+
+                    {/* 遊戲中心 Modal */}
+                    {showGameCenter && (
+                        <div className="fixed inset-0 z-[7000] flex items-center justify-center p-4 modal-blur animate-in fade-in duration-200">
+                            <div className="bg-stone-900 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden border border-amber-500/30">
+                                <div className="p-4 sm:p-6 bg-gradient-to-b from-stone-800 to-stone-900 border-b border-white/10 flex justify-between items-center relative">
+                                    <h3 className="text-xl sm:text-2xl font-black text-amber-400 flex items-center gap-2"><Icon name="gamepad-2" size={28} /> 休息一下：遊樂中心</h3>
+                                    <button onClick={() => { setShowGameCenter(false); setPlayingGame(null); setGameResult(null); }} className="text-white/50 hover:text-white bg-white/5 p-2 rounded-full"><Icon name="x" size={20} /></button>
+                                </div>
+                                <div className="p-4 sm:p-6 flex flex-col gap-6">
+                                    
+                                    {/* 帳戶資訊 */}
+                                <div className="flex justify-center items-center bg-stone-800 p-4 rounded-xl border border-stone-700">
+                                    <div className="flex gap-8">
+                                        <div className="flex flex-col items-center">
+                                            <span className="text-[10px] text-amber-200/50 font-bold uppercase">持有金幣</span>
+                                            <div className="flex items-center gap-1 text-amber-400 font-black text-2xl"><Icon name="coins" size={24} /> {profile.coins}</div>
+                                        </div>
+                                        <div className="w-px bg-stone-700"></div>
+                                        <div className="flex flex-col items-center">
+                                            <span className="text-[10px] text-emerald-200/50 font-bold uppercase">遊戲券</span>
+                                            <div className="flex items-center gap-1 text-emerald-400 font-black text-2xl"><Icon name="ticket" size={24} /> {profile.gameChances}</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* 遊戲區塊 */}
+                                    {!playingGame ? (
+                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                            {/* 輪盤 */}
+                                            <div onClick={() => executeGame('roulette')} className={`p-4 rounded-2xl flex flex-col items-center justify-center gap-2 border-2 transition-all ${profile.gameChances > 0 ? 'bg-indigo-900/40 border-indigo-500/50 hover:bg-indigo-800/60 cursor-pointer active:scale-95' : 'bg-stone-800/50 border-stone-700 opacity-50 cursor-not-allowed'}`}>
+                                                <div className="w-12 h-12 bg-indigo-500 rounded-full flex items-center justify-center text-white shadow-lg"><Icon name="loader" size={24} /></div>
+                                                <span className="text-white font-black text-sm">天地輪盤</span>
+                                                <span className="text-[10px] text-indigo-300">消耗 1 張券</span>
+                                            </div>
+                                            {/* 抽籤 */}
+                                            <div onClick={() => executeGame('lots')} className={`p-4 rounded-2xl flex flex-col items-center justify-center gap-2 border-2 transition-all ${profile.gameChances > 0 ? 'bg-rose-900/40 border-rose-500/50 hover:bg-rose-800/60 cursor-pointer active:scale-95' : 'bg-stone-800/50 border-stone-700 opacity-50 cursor-not-allowed'}`}>
+                                                <div className="w-12 h-12 bg-rose-500 rounded-lg flex items-center justify-center text-white shadow-lg"><Icon name="scroll" size={24} /></div>
+                                                <span className="text-white font-black text-sm">神之一手抽籤</span>
+                                                <span className="text-[10px] text-rose-300">消耗 1 張券</span>
+                                            </div>
+                                            {/* 刮刮樂/翻牌 */}
+                                            <div onClick={() => executeGame('scratch')} className={`p-4 rounded-2xl flex flex-col items-center justify-center gap-2 border-2 transition-all ${profile.gameChances > 0 ? 'bg-amber-900/40 border-amber-500/50 hover:bg-amber-800/60 cursor-pointer active:scale-95' : 'bg-stone-800/50 border-stone-700 opacity-50 cursor-not-allowed'}`}>
+                                                <div className="w-12 h-12 bg-amber-500 rounded flex items-center justify-center text-white shadow-lg transform rotate-12"><Icon name="sparkles" size={24} /></div>
+                                                <span className="text-white font-black text-sm">星陣刮刮樂</span>
+                                                <span className="text-[10px] text-amber-300">消耗 1 張券</span>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col items-center justify-center py-8 min-h-[200px]">
+                                            {/* 動畫展示區 */}
+                                            {!gameResult ? (
+                                                <>
+                                                    {playingGame === 'roulette' && <Icon name="loader" size={64} className="text-indigo-500 animate-fast-spin" />}
+                                                    {playingGame === 'lots' && <Icon name="scroll-text" size={64} className="text-rose-500 animate-shake-tube" />}
+                                                    {playingGame === 'scratch' && <div className="text-amber-500 font-black animate-pulse flex flex-col items-center"><Icon name="sparkles" size={48} className="mb-2" />正在刮開隱藏獎勵...</div>}
+                                                    <p className="mt-4 text-white/60 font-bold text-sm">注入靈力中...</p>
+                                                </>
+                                            ) : (
+                                                <div className="flex flex-col items-center animate-in zoom-in duration-300">
+                                                    <div className="text-6xl mb-2">🎉</div>
+                                                    <h4 className="text-2xl font-black text-white mb-2">恭喜獲得</h4>
+                                                    <div className="text-5xl font-black text-amber-400 flex items-center gap-2 mb-6">
+                                                        {gameResult} <span className="text-2xl text-amber-200">枚金幣</span>
+                                                    </div>
+                                                    <button onClick={() => { setPlayingGame(null); setGameResult(null); }} className="px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full font-bold transition-colors">繼續遊戲</button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {/* 刪除確認彈窗 */}
                     {deleteTarget && (
@@ -508,8 +684,20 @@
                     )}
 
                     <header className="bg-gradient-to-r from-indigo-950 via-stone-900 to-indigo-950 text-white py-5 sm:py-7 px-4 text-center shadow-md relative z-10 border-b-4 border-amber-500">
-                        <div className="absolute top-4 right-4 bg-white/10 px-3 py-1 rounded-full border border-white/20 text-[8px] sm:text-[10px] font-black tracking-widest text-amber-200 uppercase">VER 13.43</div>
-                        <div className="max-w-4xl mx-auto flex flex-col items-center">
+                        <div className="absolute top-4 right-4 bg-white/10 px-3 py-1 rounded-full border border-white/20 text-[8px] sm:text-[10px] font-black tracking-widest text-amber-200 uppercase">VER 14.00</div>
+                        
+                        {/* 遊戲狀態列 UI */}
+                    <div className="absolute top-4 left-4 bg-stone-800/80 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 flex items-center gap-4 cursor-pointer hover:bg-stone-700/80 transition-colors shadow-lg" onClick={() => setShowGameCenter(true)}>
+                        <div className="flex items-center gap-1.5 text-amber-400 font-black text-sm">
+                            <Icon name="coins" size={16} /> <span className="text-white text-xs">金幣</span> {profile.coins}
+                        </div>
+                        <div className="w-px h-4 bg-white/20"></div>
+                        <div className="flex items-center gap-1.5 text-emerald-400 font-black text-sm">
+                            <Icon name="ticket" size={16} /> <span className="text-white text-xs">遊戲券</span> {profile.gameChances}
+                        </div>
+                    </div>
+
+                    <div className="max-w-4xl mx-auto flex flex-col items-center mt-8 sm:mt-0">
                             <div className="inline-flex items-center gap-2 px-4 sm:px-6 py-1.5 sm:py-2 rounded-full bg-amber-500 text-black font-black text-sm sm:text-lg mb-4 sm:mb-6 shadow-lg ring-4 ring-amber-500/20">
                                 <Icon name="flame" size={20} className="sm:w-6 sm:h-6" /> <span>SAI ‧ 應試覺醒</span>
                             </div>
